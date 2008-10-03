@@ -1,5 +1,5 @@
 /* vim:ts=8
- * $Id: qconsole.c,v 1.1 2008/10/02 05:25:26 jcs Exp $
+ * $Id: qconsole.c,v 1.2 2008/10/03 01:33:08 jcs Exp $
  *
  * qconsole
  *
@@ -43,114 +43,191 @@
 #include <X11/Xlib.h>
 #include <X11/Xutil.h>
 
+#define DIR_UP		1
+#define DIR_DOWN	-1
+
+#define MAX_SPEED	10
+#define DEF_SPEED	8
+#define DEF_HEIGHT	150
+
 /* so our window manager knows us */
 char* win_name = "qconsole";
 
 struct xinfo {
 	Display* dpy;
+	Window win;
+	Window xterm;
 	int dpy_width, dpy_height;
 	int screen;
-	Window win;
-	int width;
-	int height;
-} x;
+	int speed;
+	int width, height;
+	int cur_direction;
+} main_win;
 
-pid_t xterm_pid = 0;
-int shutting_down = 0;
+/* args to pass to xterm; requires a trailing blank -into option */
+char	*xterm_args[6] = {
+	"xterm", "-name", "qconsole", "-into", "",
+	NULL
+};
 
-extern char *__progname;
+const struct option longopts[] = {
+	{ "display",	required_argument,	NULL,	'd' },
+	{ "height",	required_argument,	NULL,	'h' },
+	{ "speed",	required_argument,	NULL,	's' },
+
+	{ NULL,         0,                      NULL,   0 }
+};
+
+pid_t	xterm_pid = 0;
+int	shutting_down = 0;
+
+extern	char *__progname;
 
 void	xterm_handler(int sig);
 void	exit_handler(int sig);
-void	draw_window(void);
-void	scroll_down(void);
+void	draw_window(const char *);
+void	scroll(int direction);
 void	usage(void);
 
 int
 main(int argc, char* argv[])
 {
-	XEvent event;
+	char *display = NULL, *p;
+	int c;
 
-	signal(SIGCHLD, xterm_handler);
+	bzero(&main_win, sizeof(struct xinfo));
 
+	/* init some defaults */
+	main_win.height = DEF_HEIGHT;
+	main_win.speed = DEF_SPEED;
+
+	main_win.cur_direction = DIR_UP;
+
+	while ((c = getopt_long_only(argc, argv, "", longopts, NULL)) != -1) {
+		switch (c) {
+		case 'd':
+			display = optarg;
+			break;
+
+		case 'h':
+			main_win.height = strtol(optarg, &p, 10);
+			if (*p || main_win.height < 1)
+				errx(1, "illegal height value -- %s", optarg);
+				/* NOTREACHED */
+			break;
+
+		case 's':
+			main_win.speed = strtol(optarg, &p, 10);
+			if (*p || main_win.speed < 1 ||
+			    main_win.speed > MAX_SPEED)
+				errx(1, "speed must be between 1 and %d",
+				    MAX_SPEED);
+				/* NOTREACHED */
+			break;
+
+		default:
+			usage();
+			/* NOTREACHED */
+		}
+	}
+
+	argc -= optind;
+	argv += optind;
+
+	/* die gracefully */
 	signal(SIGINT, exit_handler);
 	signal(SIGTERM, exit_handler);
 
-	draw_window();
+	/* giddy up */
+	draw_window(display);
 
-	/* all set, fire up xterm */
+	/* fire up xterm */
+	signal(SIGCHLD, xterm_handler);
 	xterm_handler(0);
 
         for (;;) {
+		XEvent event;
 		bzero(&event, sizeof(XEvent));
-		XNextEvent (x.dpy, &event);
+		XNextEvent(main_win.dpy, &event);
 
-		if (event.type == ReparentNotify) {
-			XReparentEvent *e = (XReparentEvent *) &event;
+		switch (event.type) {
+		case ReparentNotify:
+			{
+				XReparentEvent *e = (XReparentEvent *) &event;
 
-			printf("got notify signal, win is %d\n",
-				e->window);
+				main_win.xterm = e->window;
 
-			XMoveWindow(x.dpy, e->window, 0, 0);
-			XResizeWindow(x.dpy, e->window, x.width, x.height);
-			XSetInputFocus(x.dpy, e->window, RevertToParent,
-				CurrentTime);
+				XMoveWindow(main_win.dpy, main_win.xterm, 0, 0);
+				XResizeWindow(main_win.dpy, main_win.xterm,
+					main_win.width, main_win.height);
 
-			scroll_down();
-		} else
+				scroll(DIR_DOWN);
+			}
+
+			break;
+		case KeyRelease:
+			scroll(-main_win.cur_direction);
+
+			break;
+		default:
 			printf("unknown event type 0x%x for win %d\n",
 				event.type, event.xany.window);
+		}
 	}
 
 	exit(1);
 }
 
 void
-draw_window(void)
+draw_window(const char *display)
 {
 	int rc;
-	char *display = NULL;
 	XSetWindowAttributes attributes;
 	XTextProperty win_name_prop;
 
-	bzero(&x, sizeof(struct xinfo));
-
-	if (!(x.dpy = XOpenDisplay(display)))
+	if (!(main_win.dpy = XOpenDisplay(display)))
 		errx(1, "Unable to open display %s", XDisplayName(display));
 		/* NOTREACHED */
 
-	x.screen = DefaultScreen(x.dpy);
+	main_win.screen = DefaultScreen(main_win.dpy);
 
-	x.width = x.dpy_width = DisplayWidth(x.dpy, x.screen);
-	x.dpy_height = DisplayHeight(x.dpy, x.screen);
+	main_win.width = main_win.dpy_width = DisplayWidth(main_win.dpy,
+		main_win.screen);
 
-	x.height = x.dpy_height / 5;
+	main_win.dpy_height = DisplayHeight(main_win.dpy, main_win.screen);
 
-	x.win = XCreateSimpleWindow(x.dpy, RootWindow(x.dpy, x.screen),
-			0, -(x.height),
-			x.width, x.height,
-			0,
-			BlackPixel(x.dpy, x.screen),
-			BlackPixel(x.dpy, x.screen));
+	main_win.win = XCreateSimpleWindow(main_win.dpy,
+		RootWindow(main_win.dpy, main_win.screen),
+		0, -(main_win.height),
+		main_win.width, main_win.height,
+		0,
+		BlackPixel(main_win.dpy, main_win.screen),
+		BlackPixel(main_win.dpy, main_win.screen));
 
 	if (!(rc = XStringListToTextProperty(&win_name, 1, &win_name_prop)))
 		errx(1, "XStringListToTextProperty");
 		/* NOTREACHED */
 
-	XSetWMName(x.dpy, x.win, &win_name_prop);
+	XSetWMName(main_win.dpy, main_win.win, &win_name_prop);
 
 	/* remove all window manager decorations and force our position/size */
 	/* XXX: apparently this is not very nice */
 	attributes.override_redirect = True;
-	XChangeWindowAttributes(x.dpy, x.win, CWOverrideRedirect, &attributes);
+	XChangeWindowAttributes(main_win.dpy, main_win.win,
+		CWOverrideRedirect, &attributes);
 
-	XMapWindow(x.dpy, x.win);
+	XMapWindow(main_win.dpy, main_win.win);
 
-	XFlush(x.dpy);
-	XSync(x.dpy, False);
+	XFlush(main_win.dpy);
+	XSync(main_win.dpy, False);
 
-	/* we want to know when we're exposed */
-	XSelectInput(x.dpy, x.win, SubstructureNotifyMask);
+	/* we need to know when the xterm gets reparented to us */
+	XSelectInput(main_win.dpy, main_win.win, SubstructureNotifyMask);
+
+	/* bind to control+p */
+	XGrabKey(main_win.dpy, XKeysymToKeycode(main_win.dpy, XK_p),
+		ControlMask, DefaultRootWindow(main_win.dpy), False,
+		GrabModeAsync, GrabModeAsync);
 }
 
 void
@@ -161,33 +238,27 @@ exit_handler(int sig)
 	if (xterm_pid)
 		kill(xterm_pid, SIGKILL);
 
-	XCloseDisplay(x.dpy);
+	XCloseDisplay(main_win.dpy);
 
 	exit(0);
-	/* NOTREACHED */
 }
+
 void
 xterm_handler(int sig)
 {
-	char *pargv[8] = {
-		"xterm", "-bg", "black", "-fg", "gray", "-into", "",
-		NULL
-	};
 	pid_t pid;
 
 	if (shutting_down)
 		return;
 
-	printf("in xterm_handler\n");
-
+	/* clean up if previous xterm died */
 	if (xterm_pid) {
 		int s;
 
-		XUnmapSubwindows(x.dpy, x.win);
-
-		printf("waiting\n");
+		scroll(DIR_UP);
+		XUnmapSubwindows(main_win.dpy, main_win.win);
 		wait(&s);
-		printf("done\n");
+
 		xterm_pid = 0;
 	}
 
@@ -196,8 +267,9 @@ xterm_handler(int sig)
 		case -1:
 			errx(1, "Unable to fork");
 		case 0:
-			asprintf(&pargv[6], "%d", x.win);
-			execvp("xterm", pargv);
+			/* fork xterm and pass our window id to -into opt */
+			asprintf(&xterm_args[4], "%d", main_win.win);
+			execvp("xterm", xterm_args);
 			exit(0);
 
 		default:
@@ -207,32 +279,54 @@ xterm_handler(int sig)
 }
 
 void
-scroll_down(void)
+scroll(int direction)
 {
-	int cur_x, cur_y, j;
+	int cur_x, cur_y, inc, dest;
 	unsigned width, height, bw, depth;
 	Window root;
 
-	XGetGeometry(x.dpy, x.win, &root,
+	if (direction == DIR_DOWN) {
+		XSetInputFocus(main_win.dpy, main_win.xterm, RevertToParent,
+			CurrentTime);
+		dest = 0;
+	} else
+		dest = -(main_win.height);
+
+	XGetGeometry(main_win.dpy, main_win.win, &root,
 		&cur_x, &cur_y, &width, &height, &bw, &depth);
 
-	printf("currently at %d/%d\n", cur_x, cur_y);
+	printf("scrolling from %d to %d\n", cur_y, dest);
 
-	for (j = cur_y; j <= 0;) {
-		printf("moving to %d/%d\n", 0, j);
-		XMoveWindow(x.dpy, x.win, 0, j);
-		XFlush(x.dpy);
-		XSync(x.dpy, False);
-		j -= (cur_y / 20) - 1;
+	while (cur_y != dest) {
+		inc = (abs(dest - cur_y) / MAX_SPEED) / (MAX_SPEED + 1 -
+			main_win.speed);
+
+		if (inc < 1)
+			inc = 1;
+		
+		if ((direction == DIR_DOWN && (cur_y + inc >= dest)) ||
+		    (direction == DIR_UP && (cur_y - inc < dest)))
+			break;
+
+		printf(" moving %d\n", inc);
+
+		cur_y -= (inc * direction);
+
+		XMoveWindow(main_win.dpy, main_win.win, 0, cur_y);
+
+		XFlush(main_win.dpy);
+		XSync(main_win.dpy, False);
 	}
 
-	XMoveWindow(x.dpy, x.win, 0, 0);
+	XMoveWindow(main_win.dpy, main_win.win, 0, dest);
+
+	main_win.cur_direction = direction;
 }
 
 void
 usage(void)
 {
 	fprintf(stderr, "usage: %s %s\n", __progname,
-		"[-display host:dpy] [-width <pixels>] [time time2 ...]");
+		"[-display host:dpy] [-height <pixels>] [-speed <1-10>]");
 	exit(1);
 }
