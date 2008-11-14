@@ -1,5 +1,5 @@
 /* vim:ts=8
- * $Id: qconsole.c,v 1.3 2008/11/14 04:24:05 jcs Exp $
+ * $Id: qconsole.c,v 1.4 2008/11/14 04:26:21 jcs Exp $
  *
  * Copyright (c) 2005, 2008 joshua stein <jcs@jcs.org>
  *
@@ -47,7 +47,7 @@
 #define DIR_DOWN	-1
 
 #define MAX_SPEED	10
-#define DEF_SPEED	8
+#define DEF_SPEED	9
 #define DEF_HEIGHT	157
 
 #define BORDER		4
@@ -85,34 +85,12 @@ int	respawning = 0;
 
 extern	char *__progname;
 
-void	dprintf(char *fmt, ...);
 void	draw_window(const char *);
 void	scroll(int direction, int quick);
 void	xterm_handler(int sig);
 void	exit_handler(int sig);
 void	x_error_handler(Display * d, XErrorEvent * e);
 void	usage(void);
-
-void
-dprintf(char *fmt, ...)
-{
-        static char buf[1024];
-        va_list args;
-
-	char timestr[50];
-	struct tm *parts;
-	time_t  now;
-
-	(void)time(&now);
-        parts = localtime(&now);
-        strftime(timestr, sizeof timestr, "%H:%M:%S", parts);
-
-        va_start(args, fmt);
-        (void) vsnprintf(buf, sizeof(buf), fmt, args);
-        va_end(args);
-
-        printf("%s - %d - %s", timestr, respawning, buf);
-}
 
 int
 main(int argc, char* argv[])
@@ -121,7 +99,6 @@ main(int argc, char* argv[])
 	int c;
 
 	bzero(&main_win, sizeof(struct xinfo));
-
 	main_win.height = DEF_HEIGHT;
 	main_win.speed = DEF_SPEED;
 	main_win.cur_direction = DIR_UP;
@@ -167,19 +144,16 @@ main(int argc, char* argv[])
 	signal(SIGCHLD, xterm_handler);
 	xterm_handler(0);
 
+	/* wait for events */
         for (;;) {
 		XEvent event;
 		bzero(&event, sizeof(XEvent));
 		XNextEvent(main_win.dpy, &event);
 
-		dprintf("got event %d\n", event.type);
-
 		switch (event.type) {
 		case ReparentNotify:
 			{
 				/* xterm spawned and reparented to us */
-				dprintf("got reparentnotify\n");
-
 				XReparentEvent *e = (XReparentEvent *) &event;
 				main_win.xterm = e->window;
 
@@ -275,9 +249,6 @@ scroll(int direction, int quick)
 	unsigned width, height, bw, depth;
 	Window root;
 
-	dprintf("scrolling %s %s\n", (direction == DIR_DOWN ? "down" : "up"),
-		(quick ? "quickly" : ""));
-
 	if (direction == DIR_DOWN) {
 		XSetInputFocus(main_win.dpy, main_win.xterm, RevertToParent,
 			CurrentTime);
@@ -321,26 +292,18 @@ xterm_handler(int sig)
 {
 	pid_t pid;
 
-	dprintf("in xterm_handler with sig %d\n", sig);
-
-	if (shutting_down || respawning) {
-		dprintf("returning from xterm_handler\n");
+	if (shutting_down || respawning)
 		return;
-	} else if (sig) {
-		dprintf("respawning\n");
+	else if (sig)
 		respawning = 1;
-	}
 
 	/* clean up if previous xterm died */
 	if (xterm_pid) {
-		if (waitpid(-1, NULL, WNOHANG))
-			dprintf("wait returned something\n");
-		else
-			dprintf("no wait\n");
-
+		waitpid(-1, NULL, WNOHANG);
 		xterm_pid = 0;
 
 		scroll(DIR_UP, 1);
+
 		XUnmapSubwindows(main_win.dpy, main_win.win);
 	}
 
@@ -351,7 +314,6 @@ xterm_handler(int sig)
 
 		case 0:
 			/* fork xterm and pass our window id to -into opt */
-			dprintf("running xterm\n");
 			asprintf(&xterm_args[4], "%d", (int)main_win.win);
 			execvp("xterm", xterm_args);
 			exit(0);
