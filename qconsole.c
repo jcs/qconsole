@@ -1,7 +1,5 @@
 /* vim:ts=8
- * $Id: qconsole.c,v 1.2 2008/10/03 01:33:08 jcs Exp $
- *
- * qconsole
+ * $Id: qconsole.c,v 1.3 2008/11/14 04:24:05 jcs Exp $
  *
  * Copyright (c) 2005, 2008 joshua stein <jcs@jcs.org>
  *
@@ -33,6 +31,7 @@
 #include <getopt.h>
 #include <signal.h>
 #include <stdio.h>
+#include <stdarg.h>
 #include <stdlib.h>
 #include <string.h>
 #include <time.h>
@@ -42,16 +41,16 @@
 
 #include <X11/Xlib.h>
 #include <X11/Xutil.h>
+#include <X11/Xproto.h>
 
 #define DIR_UP		1
 #define DIR_DOWN	-1
 
 #define MAX_SPEED	10
 #define DEF_SPEED	8
-#define DEF_HEIGHT	150
+#define DEF_HEIGHT	157
 
-/* so our window manager knows us */
-char* win_name = "qconsole";
+#define BORDER		4
 
 struct xinfo {
 	Display* dpy;
@@ -63,6 +62,8 @@ struct xinfo {
 	int width, height;
 	int cur_direction;
 } main_win;
+
+char* win_name = "qconsole";
 
 /* args to pass to xterm; requires a trailing blank -into option */
 char	*xterm_args[6] = {
@@ -80,14 +81,38 @@ const struct option longopts[] = {
 
 pid_t	xterm_pid = 0;
 int	shutting_down = 0;
+int	respawning = 0;
 
 extern	char *__progname;
 
+void	dprintf(char *fmt, ...);
+void	draw_window(const char *);
+void	scroll(int direction, int quick);
 void	xterm_handler(int sig);
 void	exit_handler(int sig);
-void	draw_window(const char *);
-void	scroll(int direction);
+void	x_error_handler(Display * d, XErrorEvent * e);
 void	usage(void);
+
+void
+dprintf(char *fmt, ...)
+{
+        static char buf[1024];
+        va_list args;
+
+	char timestr[50];
+	struct tm *parts;
+	time_t  now;
+
+	(void)time(&now);
+        parts = localtime(&now);
+        strftime(timestr, sizeof timestr, "%H:%M:%S", parts);
+
+        va_start(args, fmt);
+        (void) vsnprintf(buf, sizeof(buf), fmt, args);
+        va_end(args);
+
+        printf("%s - %d - %s", timestr, respawning, buf);
+}
 
 int
 main(int argc, char* argv[])
@@ -97,10 +122,8 @@ main(int argc, char* argv[])
 
 	bzero(&main_win, sizeof(struct xinfo));
 
-	/* init some defaults */
 	main_win.height = DEF_HEIGHT;
 	main_win.speed = DEF_SPEED;
-
 	main_win.cur_direction = DIR_UP;
 
 	while ((c = getopt_long_only(argc, argv, "", longopts, NULL)) != -1) {
@@ -113,7 +136,7 @@ main(int argc, char* argv[])
 			main_win.height = strtol(optarg, &p, 10);
 			if (*p || main_win.height < 1)
 				errx(1, "illegal height value -- %s", optarg);
-				/* NOTREACHED */
+
 			break;
 
 		case 's':
@@ -122,12 +145,11 @@ main(int argc, char* argv[])
 			    main_win.speed > MAX_SPEED)
 				errx(1, "speed must be between 1 and %d",
 				    MAX_SPEED);
-				/* NOTREACHED */
+
 			break;
 
 		default:
 			usage();
-			/* NOTREACHED */
 		}
 	}
 
@@ -150,28 +172,46 @@ main(int argc, char* argv[])
 		bzero(&event, sizeof(XEvent));
 		XNextEvent(main_win.dpy, &event);
 
+		dprintf("got event %d\n", event.type);
+
 		switch (event.type) {
 		case ReparentNotify:
 			{
-				XReparentEvent *e = (XReparentEvent *) &event;
+				/* xterm spawned and reparented to us */
+				dprintf("got reparentnotify\n");
 
+				XReparentEvent *e = (XReparentEvent *) &event;
 				main_win.xterm = e->window;
 
-				XMoveWindow(main_win.dpy, main_win.xterm, 0, 0);
+				/* move completely off-screen */
+				XMoveWindow(main_win.dpy, main_win.xterm,
+					-1, -1);
 				XResizeWindow(main_win.dpy, main_win.xterm,
-					main_win.width, main_win.height);
+					main_win.width,
+					main_win.height - BORDER);
 
-				scroll(DIR_DOWN);
+				respawning = 0;
 			}
 
 			break;
-		case KeyRelease:
-			scroll(-main_win.cur_direction);
+
+		case UnmapNotify:
+			/* xterm died, respawn it */
+			if (!respawning)
+				xterm_handler(NULL);
 
 			break;
-		default:
-			printf("unknown event type 0x%x for win %d\n",
-				event.type, event.xany.window);
+
+		case KeyRelease:
+			scroll(-(main_win.cur_direction), 0);
+			break;
+
+		case FocusOut:
+			if (main_win.cur_direction == DIR_DOWN)
+				XSetInputFocus(main_win.dpy, main_win.xterm,
+					RevertToParent, CurrentTime);
+
+			break;
 		}
 	}
 
@@ -187,15 +227,13 @@ draw_window(const char *display)
 
 	if (!(main_win.dpy = XOpenDisplay(display)))
 		errx(1, "Unable to open display %s", XDisplayName(display));
-		/* NOTREACHED */
+
+	XSetErrorHandler ((XErrorHandler) x_error_handler);
 
 	main_win.screen = DefaultScreen(main_win.dpy);
-
 	main_win.width = main_win.dpy_width = DisplayWidth(main_win.dpy,
 		main_win.screen);
-
 	main_win.dpy_height = DisplayHeight(main_win.dpy, main_win.screen);
-
 	main_win.win = XCreateSimpleWindow(main_win.dpy,
 		RootWindow(main_win.dpy, main_win.screen),
 		0, -(main_win.height),
@@ -206,28 +244,122 @@ draw_window(const char *display)
 
 	if (!(rc = XStringListToTextProperty(&win_name, 1, &win_name_prop)))
 		errx(1, "XStringListToTextProperty");
-		/* NOTREACHED */
 
 	XSetWMName(main_win.dpy, main_win.win, &win_name_prop);
 
 	/* remove all window manager decorations and force our position/size */
-	/* XXX: apparently this is not very nice */
 	attributes.override_redirect = True;
 	XChangeWindowAttributes(main_win.dpy, main_win.win,
 		CWOverrideRedirect, &attributes);
 
-	XMapWindow(main_win.dpy, main_win.win);
+	XMapRaised(main_win.dpy, main_win.win);
 
 	XFlush(main_win.dpy);
 	XSync(main_win.dpy, False);
 
 	/* we need to know when the xterm gets reparented to us */
-	XSelectInput(main_win.dpy, main_win.win, SubstructureNotifyMask);
+	XSelectInput(main_win.dpy, main_win.win, SubstructureNotifyMask |
+		FocusChangeMask);
 
-	/* bind to control+p */
-	XGrabKey(main_win.dpy, XKeysymToKeycode(main_win.dpy, XK_p),
+	/* bind to control+o */
+	/* TODO: allow this key to be configurable */
+	XGrabKey(main_win.dpy, XKeysymToKeycode(main_win.dpy, XK_o),
 		ControlMask, DefaultRootWindow(main_win.dpy), False,
 		GrabModeAsync, GrabModeAsync);
+}
+
+void
+scroll(int direction, int quick)
+{
+	int cur_x, cur_y, inc, dest;
+	unsigned width, height, bw, depth;
+	Window root;
+
+	dprintf("scrolling %s %s\n", (direction == DIR_DOWN ? "down" : "up"),
+		(quick ? "quickly" : ""));
+
+	if (direction == DIR_DOWN) {
+		XSetInputFocus(main_win.dpy, main_win.xterm, RevertToParent,
+			CurrentTime);
+		dest = 0;
+	} else {
+		XSetInputFocus(main_win.dpy, PointerRoot, RevertToParent,
+			CurrentTime);
+		dest = -(main_win.height);
+	}
+
+	XGetGeometry(main_win.dpy, main_win.win, &root,
+		&cur_x, &cur_y, &width, &height, &bw, &depth);
+
+	/* smoothly scroll to our destination */
+	while (!quick && cur_y != dest) {
+		inc = (abs(dest - cur_y) / MAX_SPEED) / (MAX_SPEED + 1 -
+			main_win.speed);
+
+		if (inc < 1)
+			inc = 1;
+
+		if ((direction == DIR_DOWN && (cur_y + inc >= dest)) ||
+		    (direction == DIR_UP && (cur_y - inc < dest)))
+			break;
+
+		cur_y -= (inc * direction);
+
+		XMoveWindow(main_win.dpy, main_win.win, 0, cur_y);
+
+		XFlush(main_win.dpy);
+		XSync(main_win.dpy, False);
+	}
+
+	XMoveWindow(main_win.dpy, main_win.win, 0, dest);
+
+	main_win.cur_direction = direction;
+}
+
+void
+xterm_handler(int sig)
+{
+	pid_t pid;
+
+	dprintf("in xterm_handler with sig %d\n", sig);
+
+	if (shutting_down || respawning) {
+		dprintf("returning from xterm_handler\n");
+		return;
+	} else if (sig) {
+		dprintf("respawning\n");
+		respawning = 1;
+	}
+
+	/* clean up if previous xterm died */
+	if (xterm_pid) {
+		if (waitpid(-1, NULL, WNOHANG))
+			dprintf("wait returned something\n");
+		else
+			dprintf("no wait\n");
+
+		xterm_pid = 0;
+
+		scroll(DIR_UP, 1);
+		XUnmapSubwindows(main_win.dpy, main_win.win);
+	}
+
+	if (!xterm_pid) {
+		switch (pid = fork()) {
+		case -1:
+			errx(1, "unable to fork");
+
+		case 0:
+			/* fork xterm and pass our window id to -into opt */
+			dprintf("running xterm\n");
+			asprintf(&xterm_args[4], "%d", (int)main_win.win);
+			execvp("xterm", xterm_args);
+			exit(0);
+
+		default:
+			xterm_pid = pid;
+		}
+	}
 }
 
 void
@@ -244,83 +376,11 @@ exit_handler(int sig)
 }
 
 void
-xterm_handler(int sig)
+x_error_handler(Display * d, XErrorEvent * e)
 {
-	pid_t pid;
-
-	if (shutting_down)
-		return;
-
-	/* clean up if previous xterm died */
-	if (xterm_pid) {
-		int s;
-
-		scroll(DIR_UP);
-		XUnmapSubwindows(main_win.dpy, main_win.win);
-		wait(&s);
-
-		xterm_pid = 0;
-	}
-
-	if (!xterm_pid) {
-		switch (pid = fork()) {
-		case -1:
-			errx(1, "Unable to fork");
-		case 0:
-			/* fork xterm and pass our window id to -into opt */
-			asprintf(&xterm_args[4], "%d", main_win.win);
-			execvp("xterm", xterm_args);
-			exit(0);
-
-		default:
-			xterm_pid = pid;
-		}
-	}
-}
-
-void
-scroll(int direction)
-{
-	int cur_x, cur_y, inc, dest;
-	unsigned width, height, bw, depth;
-	Window root;
-
-	if (direction == DIR_DOWN) {
-		XSetInputFocus(main_win.dpy, main_win.xterm, RevertToParent,
-			CurrentTime);
-		dest = 0;
-	} else
-		dest = -(main_win.height);
-
-	XGetGeometry(main_win.dpy, main_win.win, &root,
-		&cur_x, &cur_y, &width, &height, &bw, &depth);
-
-	printf("scrolling from %d to %d\n", cur_y, dest);
-
-	while (cur_y != dest) {
-		inc = (abs(dest - cur_y) / MAX_SPEED) / (MAX_SPEED + 1 -
-			main_win.speed);
-
-		if (inc < 1)
-			inc = 1;
-		
-		if ((direction == DIR_DOWN && (cur_y + inc >= dest)) ||
-		    (direction == DIR_UP && (cur_y - inc < dest)))
-			break;
-
-		printf(" moving %d\n", inc);
-
-		cur_y -= (inc * direction);
-
-		XMoveWindow(main_win.dpy, main_win.win, 0, cur_y);
-
-		XFlush(main_win.dpy);
-		XSync(main_win.dpy, False);
-	}
-
-	XMoveWindow(main_win.dpy, main_win.win, 0, dest);
-
-	main_win.cur_direction = direction;
+	if (e->error_code == BadAccess && e->request_code == X_GrabKey)
+		errx(1, "could not bind key.  possibly another application "
+			"bound to it?\n");
 }
 
 void
