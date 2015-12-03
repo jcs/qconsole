@@ -1,7 +1,9 @@
 ###qconsole
 
+![https://i.imgur.com/IBAAN8j.png](https://i.imgur.com/IBAAN8j.png)
+
 qconsole is a simple application that makes an xterm window behave like the
-console on the game "quake" (and probably many others).
+drop-down console on the game "Quake" (and probably many others).
 
 When qconsole is started, it spawns an xterm with the "`-into`" option to
 reparent it under qconsole, and then hides it offscreen.
