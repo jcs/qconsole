@@ -1,12 +1,11 @@
-/* vim:ts=8
- * $Id: qconsole.c,v 1.4 2008/11/14 04:26:21 jcs Exp $
- *
- * Copyright (c) 2005, 2008 joshua stein <jcs@jcs.org>
+/*
+ * qconsole
+ * Copyright (c) 2005, 2008, 2015 joshua stein <jcs@jcs.org>
  *
  * Redistribution and use in source and binary forms, with or without
  * modification, are permitted provided that the following conditions
  * are met:
- * 
+ *
  * 1. Redistributions of source code must retain the above copyright
  *    notice, this list of conditions and the following disclaimer.
  * 2. Redistributions in binary form must reproduce the above copyright
@@ -14,7 +13,7 @@
  *    documentation and/or other materials provided with the distribution.
  * 3. The name of the author may not be used to endorse or promote products
  *    derived from this software without specific prior written permission.
- * 
+ *
  * THIS SOFTWARE IS PROVIDED BY THE AUTHOR ``AS IS'' AND ANY EXPRESS OR
  * IMPLIED WARRANTIES, INCLUDING, BUT NOT LIMITED TO, THE IMPLIED WARRANTIES
  * OF MERCHANTABILITY AND FITNESS FOR A PARTICULAR PURPOSE ARE DISCLAIMED.
@@ -47,7 +46,7 @@
 #define DIR_DOWN	-1
 
 #define MAX_SPEED	10
-#define DEF_SPEED	9
+#define DEF_SPEED	7
 #define DEF_HEIGHT	157
 
 #define BORDER		4
@@ -63,50 +62,46 @@ struct xinfo {
 	int cur_direction;
 } main_win;
 
-char* win_name = "qconsole";
+char *win_name = "qconsole";
 
 /* args to pass to xterm; requires a trailing blank -into option */
-char	*xterm_args[6] = {
-	"xterm", "-name", "qconsole", "-into", "",
+static char *xterm_args[6] = {
+	"xterm",
+	"-name", "qconsole",
+	"-into", "",
 	NULL
 };
 
-const struct option longopts[] = {
-	{ "display",	required_argument,	NULL,	'd' },
-	{ "height",	required_argument,	NULL,	'h' },
-	{ "speed",	required_argument,	NULL,	's' },
+static int	debug = 0;
+static pid_t	xterm_pid = 0;
+static int	shutting_down = 0;
+static int	respawning = 0;
 
-	{ NULL,         0,                      NULL,   0 }
-};
+extern char	*__progname;
 
-pid_t	xterm_pid = 0;
-int	shutting_down = 0;
-int	respawning = 0;
-
-extern	char *__progname;
-
-void	draw_window(const char *);
-void	scroll(int direction, int quick);
-void	xterm_handler(int sig);
-void	exit_handler(int sig);
-void	x_error_handler(Display * d, XErrorEvent * e);
-void	usage(void);
+void		draw_window(const char *);
+void		scroll(int direction, int quick);
+void		xterm_spawn(void);
+void		child_handler(int sig);
+void		exit_handler(int sig);
+void		x_error_handler(Display * d, XErrorEvent * e);
+void		usage(void);
 
 int
 main(int argc, char* argv[])
 {
 	char *display = NULL, *p;
-	int c;
+	int ch;
 
 	bzero(&main_win, sizeof(struct xinfo));
 	main_win.height = DEF_HEIGHT;
 	main_win.speed = DEF_SPEED;
 	main_win.cur_direction = DIR_UP;
 
-	while ((c = getopt_long_only(argc, argv, "", longopts, NULL)) != -1) {
-		switch (c) {
+	while ((ch = getopt(argc, argv, "dh:s:")) != -1)
+		switch (ch) {
 		case 'd':
-			display = optarg;
+			debug = 1;
 			break;
 
 		case 'h':
@@ -128,7 +123,6 @@ main(int argc, char* argv[])
 		default:
 			usage();
 		}
-	}
 
 	argc -= optind;
 	argv += optind;
@@ -137,12 +131,12 @@ main(int argc, char* argv[])
 	signal(SIGINT, exit_handler);
 	signal(SIGTERM, exit_handler);
 
-	/* giddy up */
-	draw_window(display);
+	/* handle xterm exiting */
+	signal(SIGCHLD, child_handler);
 
-	/* fire up xterm */
-	signal(SIGCHLD, xterm_handler);
-	xterm_handler(0);
+	/* fire up initial xterm */
+	draw_window(display);
+	xterm_spawn();
 
 	/* wait for events */
         for (;;) {
@@ -151,28 +145,28 @@ main(int argc, char* argv[])
 		XNextEvent(main_win.dpy, &event);
 
 		switch (event.type) {
-		case ReparentNotify:
-			{
-				/* xterm spawned and reparented to us */
-				XReparentEvent *e = (XReparentEvent *) &event;
-				main_win.xterm = e->window;
+		case ReparentNotify: {
+			if (debug)
+				printf("xterm spawned and reparented to us\n");
 
-				/* move completely off-screen */
-				XMoveWindow(main_win.dpy, main_win.xterm,
-					-1, -1);
-				XResizeWindow(main_win.dpy, main_win.xterm,
-					main_win.width,
-					main_win.height - BORDER);
+			XReparentEvent *e = (XReparentEvent *) &event;
+			main_win.xterm = e->window;
 
-				respawning = 0;
-			}
+			/* move completely off-screen */
+			XMoveWindow(main_win.dpy, main_win.xterm,
+				-1, -1);
+			XResizeWindow(main_win.dpy, main_win.xterm,
+				main_win.width,
+				main_win.height - BORDER);
 
 			break;
+		}
 
 		case UnmapNotify:
-			/* xterm died, respawn it */
-			if (!respawning)
-				xterm_handler(NULL);
+			if (debug)
+				printf("xterm unmapped, respawning\n");
+
+			xterm_spawn();
 
 			break;
 
@@ -262,6 +256,13 @@ scroll(int direction, int quick)
 	XGetGeometry(main_win.dpy, main_win.win, &root,
 		&cur_x, &cur_y, &width, &height, &bw, &depth);
 
+	if (debug)
+		printf("scrolling from %d to %d%s\n", cur_y, dest,
+		    (quick ? " quickly" : ""));
+
+	if (direction == DIR_DOWN)
+		XRaiseWindow(main_win.dpy, main_win.win);
+
 	/* smoothly scroll to our destination */
 	while (!quick && cur_y != dest) {
 		inc = (abs(dest - cur_y) / MAX_SPEED) / (MAX_SPEED + 1 -
@@ -277,37 +278,61 @@ scroll(int direction, int quick)
 		cur_y -= (inc * direction);
 
 		XMoveWindow(main_win.dpy, main_win.win, 0, cur_y);
-
-		XFlush(main_win.dpy);
 		XSync(main_win.dpy, False);
 	}
 
 	XMoveWindow(main_win.dpy, main_win.win, 0, dest);
-
 	main_win.cur_direction = direction;
+
+	if (direction == DIR_DOWN)
+		XRaiseWindow(main_win.dpy, main_win.win);
 }
 
 void
-xterm_handler(int sig)
+child_handler(int sig)
+{
+	if (!xterm_pid)
+		return;
+
+	if (debug && sig)
+		printf("got SIGCHLD, cleaning up after xterm pid %d\n",
+		    xterm_pid);
+
+	waitpid(-1, NULL, WNOHANG);
+	xterm_pid = 0;
+}
+
+void
+xterm_spawn(void)
 {
 	pid_t pid;
 
-	if (shutting_down || respawning)
+	/* this is called in response to SIGCHLD, but signal handlers can't do
+	 * any x11 operations */
+
+	if (shutting_down) {
+		if (debug)
+			printf("shutting down, not respawning\n");
+
 		return;
-	else if (sig)
-		respawning = 1;
+	}
+
+	if (debug)
+		printf("in xterm_spawn\n");
 
 	/* clean up if previous xterm died */
 	if (xterm_pid) {
-		waitpid(-1, NULL, WNOHANG);
-		xterm_pid = 0;
+		child_handler(0);
 
 		scroll(DIR_UP, 1);
-
 		XUnmapSubwindows(main_win.dpy, main_win.win);
 	}
 
-	if (!xterm_pid) {
+	if (!xterm_pid && !shutting_down) {
+		if (debug)
+			printf("forking new xterm into %d\n",
+			    (int)main_win.win);
+
 		switch (pid = fork()) {
 		case -1:
 			errx(1, "unable to fork");
@@ -320,6 +345,8 @@ xterm_handler(int sig)
 
 		default:
 			xterm_pid = pid;
+			/* we are now able to be killed */
+			respawning = 1;
 		}
 	}
 }
@@ -329,10 +356,11 @@ exit_handler(int sig)
 {
 	shutting_down = 1;
 
+	if (debug)
+		printf("in exit_handler with sig %d, shutting down\n", sig);
+
 	if (xterm_pid)
 		kill(xterm_pid, SIGKILL);
-
-	XCloseDisplay(main_win.dpy);
 
 	exit(0);
 }
@@ -349,6 +377,6 @@ void
 usage(void)
 {
 	fprintf(stderr, "usage: %s %s\n", __progname,
-		"[-display host:dpy] [-height <pixels>] [-speed <1-10>]");
+		"[-d] [-h <height>] [-s <speed 1-10>]");
 	exit(1);
 }
