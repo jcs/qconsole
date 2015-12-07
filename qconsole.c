@@ -93,7 +93,7 @@ main(int argc, char* argv[])
 	char *display = NULL, *p;
 	int ch;
 
-	bzero(&main_win, sizeof(struct xinfo));
+	memset(&main_win, 0, sizeof(struct xinfo));
 	main_win.height = DEF_HEIGHT;
 	main_win.speed = DEF_SPEED;
 	main_win.cur_direction = DIR_UP;
@@ -141,7 +141,7 @@ main(int argc, char* argv[])
 	/* wait for events */
         for (;;) {
 		XEvent event;
-		bzero(&event, sizeof(XEvent));
+		memset(&event, 0, sizeof(XEvent));
 		XNextEvent(main_win.dpy, &event);
 
 		switch (event.type) {
