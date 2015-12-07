@@ -286,6 +286,8 @@ scroll(int direction, int quick)
 
 	if (direction == DIR_DOWN)
 		XRaiseWindow(main_win.dpy, main_win.win);
+	else
+		XLowerWindow(main_win.dpy, main_win.win);
 }
 
 void
