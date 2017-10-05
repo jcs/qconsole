@@ -46,7 +46,7 @@
 #define DIR_DOWN	-1
 
 #define MAX_SPEED	10
-#define DEF_SPEED	7
+#define DEF_SPEED	(MAX_SPEED / 2)
 
 #define BORDER		4
 
@@ -375,7 +375,7 @@ x_error_handler(Display * d, XErrorEvent * e)
 void
 usage(void)
 {
-	fprintf(stderr, "usage: %s %s\n", __progname,
-		"[-d] [-h <height>] [-s <speed 1-10>]");
+	fprintf(stderr, "usage: %s [-d] [-h <height>] [-s <speed 1-%d>]\n",
+	    __progname, MAX_SPEED);
 	exit(1);
 }
