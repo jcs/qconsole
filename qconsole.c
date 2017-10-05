@@ -47,7 +47,6 @@
 
 #define MAX_SPEED	10
 #define DEF_SPEED	7
-#define DEF_HEIGHT	157
 
 #define BORDER		4
 
@@ -96,9 +95,11 @@ main(int argc, char* argv[])
 	int ch;
 
 	memset(&main_win, 0, sizeof(struct xinfo));
-	main_win.height = DEF_HEIGHT;
 	main_win.speed = DEF_SPEED;
 	main_win.cur_direction = DIR_UP;
+
+	/* will get set according to screen height if not overridden by -h */
+	main_win.height = 0;
 
 	while ((ch = getopt(argc, argv, "dh:s:")) != -1)
 		switch (ch) {
@@ -196,6 +197,10 @@ draw_window(const char *display)
 		errx(1, "Unable to open display %s", XDisplayName(display));
 
 	XSetErrorHandler ((XErrorHandler) x_error_handler);
+
+	if (main_win.height == 0)
+		main_win.height = DisplayHeight(main_win.dpy,
+		    main_win.screen) / 5;
 
 	main_win.screen = DefaultScreen(main_win.dpy);
 	main_win.width = main_win.dpy_width = DisplayWidth(main_win.dpy,
