@@ -221,7 +221,6 @@ draw_window(const char *display)
 
 	XMapRaised(main_win.dpy, main_win.win);
 
-	XFlush(main_win.dpy);
 	XSync(main_win.dpy, False);
 
 	/* we need to know when the xterm gets reparented to us */
